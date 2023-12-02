@@ -523,7 +523,8 @@ static int nvme_register_extensions(FemuCtrl *n)
         nvme_register_bbssd(n);
     } else if (ZNSSD(n)) {
         nvme_register_znssd(n);
-    } else {
+    } else if (MSSSD(n)){
+	    nvme_register_msssd(n);
         /* TODO: For future extensions */
     }
 
@@ -560,12 +561,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     n->features.int_vector_config = g_malloc0(sizeof(*n->features.int_vector_config) * (n->nr_io_queues + 1));
     n->str_param = g_malloc0(sizeof(NvmeDirStrParam));
 
+    n->gc_write_bytes = 0;
+    n->host_write_bytes = 0;
     nvme_init_pci(n);
     nvme_init_ctrl(n);
     nvme_init_namespaces(n, errp);
 
     nvme_register_extensions(n);
-
     if (n->ext_ops.init) {
         n->ext_ops.init(n, errp);
     }

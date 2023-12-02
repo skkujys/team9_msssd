@@ -672,6 +672,7 @@ enum LogIdentifier {
     NVME_LOG_SMART_INFO     = 0x02,
     NVME_LOG_FW_SLOT_INFO   = 0x03,
     NVME_LOG_CMD_EFFECTS    = 0x05,
+    NVME_LOG_WAF_INFO	    = 0x17,
 };
 
 typedef struct NvmePSD {
@@ -1372,6 +1373,9 @@ typedef struct FemuCtrl {
     BbCtrlParams bb_params;
 
     struct ssd      *ssd;
+    uint64_t gc_write_bytes;/*jy is screwed, sorry*/
+    uint64_t host_write_bytes;/*jy is screwed, sorry*/
+    int streams[6];
     SsdDramBackend  *mbe;
     int             completed;
 
@@ -1413,6 +1417,7 @@ enum {
     FEMU_BBSSD_MODE = 1,
     FEMU_NOSSD_MODE = 2,
     FEMU_ZNSSD_MODE = 3,
+    FEMU_MSSSD_MODE = 4,
     FEMU_SMARTSSD_MODE,
     FEMU_KVSSD_MODE,
 };
@@ -1445,6 +1450,11 @@ static inline bool NOSSD(FemuCtrl *n)
 static inline bool ZNSSD(FemuCtrl *n)
 {
     return (n->femu_mode == FEMU_ZNSSD_MODE);
+}
+
+static inline bool MSSSD(FemuCtrl *n)
+{
+    return (n->femu_mode == FEMU_MSSSD_MODE);
 }
 
 /* Basic NVMe Queue Pair operation APIs from nvme-util.c */
@@ -1506,6 +1516,7 @@ int nvme_register_ocssd20(FemuCtrl *n);
 int nvme_register_nossd(FemuCtrl *n);
 int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
+int nvme_register_msssd(FemuCtrl *n);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

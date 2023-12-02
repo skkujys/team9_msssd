@@ -114,9 +114,9 @@ static void ssd_init_lines(struct ssd *ssd)
     lm->full_line_cnt = 0;
 }
 
-static void ssd_init_write_pointer(struct ssd *ssd)
+static void ssd_init_write_pointer(struct ssd *ssd, uint32_t stream)
 {
-    struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp = &ssd->wp[stream];
     struct line_mgmt *lm = &ssd->lm;
     struct line *curline = NULL;
 
@@ -129,7 +129,7 @@ static void ssd_init_write_pointer(struct ssd *ssd)
     wpp->ch = 0;
     wpp->lun = 0;
     wpp->pg = 0;
-    wpp->blk = 0;
+    wpp->blk = curline->id;
     wpp->pl = 0;
 }
 
@@ -154,10 +154,10 @@ static struct line *get_next_free_line(struct ssd *ssd)
     return curline;
 }
 
-static void ssd_advance_write_pointer(struct ssd *ssd)
+static void ssd_advance_write_pointer(struct ssd *ssd, uint32_t stream)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp = &ssd->wp[stream];
     struct line_mgmt *lm = &ssd->lm;
 
     check_addr(wpp->ch, spp->nchs);
@@ -208,9 +208,9 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
     }
 }
 
-static struct ppa get_new_page(struct ssd *ssd)
+static struct ppa get_new_page(struct ssd *ssd, uint32_t stream)
 {
-    struct write_pointer *wpp = &ssd->wp;
+    struct write_pointer *wpp = &ssd->wp[stream];
     struct ppa ppa;
     ppa.ppa = 0;
     ppa.g.ch = wpp->ch;
@@ -360,7 +360,7 @@ static void ssd_init_rmap(struct ssd *ssd)
     }
 }
 
-void ssd_init(FemuCtrl *n)
+void ms_ssd_init(FemuCtrl *n)
 {
     struct ssd *ssd = n->ssd;
     struct ssdparams *spp = &ssd->sp;
@@ -385,12 +385,16 @@ void ssd_init(FemuCtrl *n)
     ssd_init_lines(ssd);
 
     /* initialize write pointer, this is how we allocate new pages for writes */
-    ssd_init_write_pointer(ssd);
-
+    for(int i=0; i<6; i++)
+    {
+    	ssd_init_write_pointer(ssd, i);
+	ssd->streams[i]=0;
+    }
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
     ssd->gc_write_bytes = 0;
     ssd->host_write_bytes = 0;
+    
 }
 
 static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
@@ -560,7 +564,7 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
     /* Adjust the position of the victime line in the pq under over-writes */
     if (line->pos) {
         /* Note that line->vpc will be updated by this call */
-        pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
+	    if(lm->victim_line_cnt!=0) pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
     } else {
         line->vpc--;
     }
@@ -629,14 +633,14 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
-static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
+static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint32_t stream)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
-
+		
     ftl_assert(valid_lpn(ssd, lpn));
-    new_ppa = get_new_page(ssd);
+    new_ppa = get_new_page(ssd, stream);
     /* update maptbl */
     set_maptbl_ent(ssd, lpn, &new_ppa);
     /* update rmap */
@@ -645,7 +649,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     mark_page_valid(ssd, &new_ppa);
 
     /* need to advance the write pointer here */
-    ssd_advance_write_pointer(ssd);
+    ssd_advance_write_pointer(ssd, stream);
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
@@ -690,7 +694,7 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
 }
 
 /* here ppa identifies the block we want to clean */
-static void clean_one_block(struct ssd *ssd, struct ppa *ppa)/*static void to static int changed(jy)*/
+static void clean_one_block(struct ssd *ssd, struct ppa *ppa, uint32_t stream)/*static void to static int changed(jy)*/
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
@@ -704,7 +708,7 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)/*static void to st
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
             /* delay the maptbl update until "write" happens */
-            gc_write_page(ssd, ppa);
+            gc_write_page(ssd, ppa, stream);
             cnt++;
         }
     }
@@ -723,7 +727,7 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     lm->free_line_cnt++;
 }
 
-static int do_gc(struct ssd *ssd, bool force)
+static int do_gc(struct ssd *ssd, bool force, uint32_t stream)
 {
     struct line *victim_line = NULL;
     struct ssdparams *spp = &ssd->sp;
@@ -748,7 +752,7 @@ static int do_gc(struct ssd *ssd, bool force)
             ppa.g.lun = lun;
             ppa.g.pl = 0;
             lunp = get_lun(ssd, &ppa);
-            clean_one_block(ssd, &ppa);/*(jy)*/
+            clean_one_block(ssd, &ppa, stream);/*(jy)*/
             mark_block_free(ssd, &ppa);
 
             if (spp->enable_gc_delay) {
@@ -816,18 +820,19 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
     int r;
-
+    NvmeRwCmd *rw =(NvmeRwCmd *)&req->cmd;//
+    uint32_t stream = rw->dsmgmt;//
+    stream = stream>>16;//
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
     }
-
     while (should_gc_high(ssd)) {
         /* perform GC here until !should_gc(ssd) */
-        r = do_gc(ssd, true);
+        r = do_gc(ssd, true, stream);
         if (r == -1)
             break;
     }
-
+    ssd->streams[stream]++;
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
@@ -837,7 +842,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         }
 
         /* new write */
-        ppa = get_new_page(ssd);
+        ppa = get_new_page(ssd, stream);
         /* update maptbl */
         set_maptbl_ent(ssd, lpn, &ppa);
         /* update rmap */
@@ -846,7 +851,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         mark_page_valid(ssd, &ppa);
 
         /* need to advance the write pointer here */
-        ssd_advance_write_pointer(ssd);
+        ssd_advance_write_pointer(ssd, stream);
 
         struct nand_cmd swr;
         swr.type = USER_IO;
@@ -868,7 +873,6 @@ static void *ftl_thread(void *arg)
     uint64_t lat = 0;
     int rc;
     int i;
-
     while (!*(ssd->dataplane_started_ptr)) {
         usleep(100000);
     }
@@ -893,6 +897,10 @@ static void *ftl_thread(void *arg)
                 lat = ssd_write(ssd, req);
 		n->gc_write_bytes = ssd->gc_write_bytes;
 		n->host_write_bytes = ssd->host_write_bytes;
+		for(int i=0; i<6; i++)
+		{
+			n->streams[i] = ssd->streams[i];
+		}
                 break;
             case NVME_CMD_READ:
                 lat = ssd_read(ssd, req);
@@ -904,7 +912,7 @@ static void *ftl_thread(void *arg)
                 //ftl_err("FTL received unkown request type, ERROR\n");
                 ;
             }
-
+            
             req->reqlat = lat;
             req->expire_time += lat;
 
@@ -915,7 +923,7 @@ static void *ftl_thread(void *arg)
 
             /* clean one line if needed (in the background) */
             if (should_gc(ssd)) {
-                do_gc(ssd, false);
+                do_gc(ssd, false, 0);
 		n->gc_write_bytes = ssd->gc_write_bytes;
 		n->host_write_bytes = ssd->host_write_bytes;
             }

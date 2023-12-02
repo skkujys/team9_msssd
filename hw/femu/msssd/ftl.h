@@ -200,9 +200,9 @@ struct ssd {
     struct ssd_channel *ch;
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
-    struct write_pointer wp;
+    struct write_pointer wp[6];
     struct line_mgmt lm;
-
+    
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
     struct rte_ring **to_poller;
@@ -210,9 +210,10 @@ struct ssd {
     QemuThread ftl_thread;
     uint64_t gc_write_bytes;
     uint64_t host_write_bytes;
+    int streams[6];
 };
 
-void ssd_init(FemuCtrl *n);
+void ms_ssd_init(FemuCtrl *n);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \
